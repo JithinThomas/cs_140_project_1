@@ -31,6 +31,12 @@ static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
 
+static Heap threads_waiting_on_timer;
+
+int64_t thread_timer_key(void* thread) {
+  return (struct thread *)thread->wake_up_ticks;
+}
+
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
@@ -38,6 +44,8 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+
+  threads_sleeping = heap_init(thread_timer_key);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -87,6 +95,7 @@ timer_elapsed (int64_t then)
 
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
+/*
 void
 timer_sleep (int64_t ticks) 
 {
@@ -95,6 +104,23 @@ timer_sleep (int64_t ticks)
   ASSERT (intr_get_level () == INTR_ON);
   while (timer_elapsed (start) < ticks) 
     thread_yield ();
+}
+*/
+
+/* Sleeps for approximately TICKS timer ticks.  Interrupts must
+   be turned on. */
+void
+timer_sleep (int64_t ticks) 
+{
+  if (ticks > 0) {
+    ASSERT (intr_get_level () == INTR_ON);
+    
+    struct thread * current_thread = thread_current ();
+    current_thread->wake_up_ticks = timer_ticks () + ticks;
+
+    heap_insert_elem (threads_sleeping, current_thread); 
+    thread_yield ();
+  }
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -166,13 +192,20 @@ timer_print_stats (void)
 {
   printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
-
+
 /* Timer interrupt handler. */
 static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
   thread_tick ();
+
+  struct thread * min = (struct thread *)heap_peek_min(threads_sleeping);
+  while ((min != NULL) && (min->wake_up_ticks == ticks)) {
+    heap_pop_min(threads_sleeping);
+    thread_unblock(min);
+    min = (struct thread *)heap_peek_min(threads_sleeping);
+  }
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
